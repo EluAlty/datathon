@@ -6,6 +6,7 @@ from sklearn.metrics import mean_absolute_error
 from datetime import datetime
 import joblib
 import sys
+from math import radians, sin, cos, sqrt, atan2
 
 # Load the data
 trips = pd.read_csv('trips_data.csv')
@@ -193,3 +194,66 @@ joblib.dump(model, model_path)
 
 print("Model training completed.")
 print(f"Model saved to: {model_path}")
+
+# Изменяем подготовку данных
+def prepare_features(df):
+    features = pd.DataFrame()
+    
+    # Рассчитываем расстояние между остановками
+    features['segment_length'] = calculate_distances(
+        df['latitude'], 
+        df['longitude'],
+        df['latitude'].shift(),
+        df['longitude'].shift()
+    )
+    
+    # Время суток (час)
+    features['hour_of_day'] = df['scheduled_time'].apply(
+        lambda x: int(x.split(':')[0]) if isinstance(x, str) else x // 60
+    )
+    
+    # День недели (можно добавить позже)
+    features['day_of_week'] = 0
+    
+    return features
+
+def calculate_distances(lat1, lon1, lat2, lon2):
+    # Используем формулу гаверсинусов для расчета расстояния
+    R = 6371  # радиус Земли в километрах
+    
+    lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    
+    a = np.sin(dlat/2)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2)**2
+    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
+    distance = R * c
+    
+    return distance
+
+# Основной процесс тренировки
+def train_model(data):
+    features = prepare_features(data)
+    
+    # Целевая переменная - время в пути между остановками
+    target = data['travel_time']  # предполагаем, что это время в минутах
+    
+    # Разделение данных
+    X_train, X_test, y_train, y_test = train_test_split(
+        features, target, test_size=0.2, random_state=42
+    )
+    
+    # Обучение модели
+    model = XGBRegressor(n_estimators=100, learning_rate=0.1, max_depth=5)
+    model.fit(X_train, y_train)
+    
+    # Сохранение модели
+    joblib.dump(model, 'bus_travel_time_model.pkl')
+    
+    return model
+
+# Запуск тренировки
+if __name__ == "__main__":
+    # Загрузка данных
+    data = pd.read_csv('routes_data.csv')
+    model = train_model(data)

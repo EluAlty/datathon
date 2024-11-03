@@ -6,6 +6,8 @@ import numpy as np
 from datetime import datetime, timedelta
 import joblib
 import os
+from pydantic import BaseModel
+import time
 
 app = FastAPI()
 
@@ -95,9 +97,13 @@ async def upload_file(file: UploadFile = File(...)):
         else:
             return {"error": "Only CSV and JSON files are supported"}
 
+        # Конвертируем scheduled_time в минуты
+        if 'scheduled_time' in df.columns:
+            df['scheduled_time'] = df['scheduled_time'].apply(time_to_minutes)
+
         required_columns = [
             'route_id', 'stop_id', 'latitude', 'longitude',
-            'scheduled_time', 'dwell_time_in_seconds', 'segment_length'
+            'scheduled_time'
         ]
         missing_columns = [
             col for col in required_columns if col not in df.columns
@@ -107,18 +113,19 @@ async def upload_file(file: UploadFile = File(...)):
                 "error": f"Missing required columns: {', '.join(missing_columns)}"
             }
 
-        df['route_id'] = df['route_id'].astype(str)
-        df['stop_id'] = df['stop_id'].astype(str)
-
-        if 'scheduled_time' in df.columns:
-            df['scheduled_time'] = df['scheduled_time'].apply(
-                lambda x: time_to_minutes(x)
-                if isinstance(x, str) else x
-            )
-
-        # Calculate 'scheduled_travel_time' between stops
-        df = df.sort_values(by=['route_id', 'scheduled_time'])
-        df['scheduled_travel_time'] = df.groupby('route_id')['scheduled_time'].diff().fillna(0)
+        # Добавляем вычисление segment_length
+        df['segment_length'] = df.apply(
+            lambda row: calculate_distance(
+                row['latitude'], 
+                row['longitude'],
+                df.shift(1)['latitude'].iloc[0] if pd.notna(df.shift(1)['latitude'].iloc[0]) else row['latitude'],
+                df.shift(1)['longitude'].iloc[0] if pd.notna(df.shift(1)['longitude'].iloc[0]) else row['longitude']
+            ),
+            axis=1
+        )
+        
+        # Добавляем фиксированное значение dwell_time_in_seconds
+        df['dwell_time_in_seconds'] = 30  # среднее время остановки
 
         routes = process_data_with_predictions(df)
         global routes_data
@@ -146,11 +153,11 @@ def predict_travel_time(row, start_time):
     predicted_travel_time = model.predict(features)[0]  # Model output in minutes
     return float(predicted_travel_time) 
 
-def process_data_with_predictions(df: pd.DataFrame) -> List[Dict]:
+def process_data_with_predictions(df):
     routes = []
-    for route_id in df['route_id'].unique():
-        route_stops = df[df['route_id'] == route_id].sort_values('scheduled_time')
-        
+    
+    # Группируем данные по маршрутам
+    for route_id, route_stops in df.groupby('route_id'):
         stops = []
         segments = []
         prev_stop = None
@@ -160,7 +167,7 @@ def process_data_with_predictions(df: pd.DataFrame) -> List[Dict]:
         first_stop = route_stops.iloc[0]
         scheduled_time_minutes = first_stop['scheduled_time']
         start_time = datetime.now().replace(
-            hour=int(scheduled_time_minutes // 60) % 24,
+            hour=int(scheduled_time_minutes // 60),
             minute=int(scheduled_time_minutes % 60),
             second=0, microsecond=0
         )
@@ -170,7 +177,7 @@ def process_data_with_predictions(df: pd.DataFrame) -> List[Dict]:
             if idx == 0:
                 predicted_travel_time = 0
             else:
-                # Подготовка данных для предсказания времени между предыдущей и текущей остановкой
+                # Подготовка данных для предсказания
                 features = pd.DataFrame([{
                     'scheduled_travel_time': row['scheduled_travel_time'],
                     'dwell_time_in_seconds': row['dwell_time_in_seconds'],
@@ -179,11 +186,10 @@ def process_data_with_predictions(df: pd.DataFrame) -> List[Dict]:
                     'hour_of_day': start_time.hour
                 }])
 
-                # Предсказанное время в пути между предыдущей и текущей остановкой
                 predicted_travel_time = model.predict(features)[0]
-            
-            # Обновляем время прибытия на текущую остановку на основе предсказанного времени
+
             arrival_time = start_time + timedelta(minutes=float(predicted_travel_time))
+            
             stop = {
                 "id": str(row['stop_id']),
                 "name": row.get('address', f"Stop {row['stop_id']}"),
@@ -191,19 +197,18 @@ def process_data_with_predictions(df: pd.DataFrame) -> List[Dict]:
                 "predictedArrivalTime": arrival_time.strftime("%H:%M")
             }
 
-            # Рассчитываем travelTime как разницу между текущим и предыдущим временем прибытия
             if prev_stop and prev_arrival_time:
                 travel_time = (arrival_time - prev_arrival_time).total_seconds() / 60
                 segment = {
                     "from": prev_stop,
                     "to": stop,
-                    "travelTime": round(travel_time, 2)  # Точное время в пути между остановками
+                    "travelTime": round(travel_time, 2)
                 }
                 segments.append(segment)
 
             stops.append(stop)
             prev_stop = stop
-            prev_arrival_time = arrival_time  # Обновляем предыдущее время прибытия
+            prev_arrival_time = arrival_time
             start_time = arrival_time + timedelta(seconds=float(row['dwell_time_in_seconds']))
 
         route = {
@@ -215,6 +220,86 @@ def process_data_with_predictions(df: pd.DataFrame) -> List[Dict]:
         routes.append(route)
 
     return routes
+
+# Добавим новые модели данных
+class StopCreate(BaseModel):
+    name: str
+    latitude: float
+    longitude: float
+    scheduled_time: str
+
+class RouteCreate(BaseModel):
+    name: str
+    stops: List[StopCreate]
+
+# Добавим новые эндпоинты
+@app.post("/api/routes/create")
+async def create_route(route: RouteCreate):
+    try:
+        global routes_data
+        route_id = str(int(time.time()))
+        
+        # Преобразуем данные в формат DataFrame
+        stops_data = []
+        for idx, stop in enumerate(route.stops):
+            stops_data.append({
+                'route_id': route_id,
+                'stop_id': idx + 1,
+                'latitude': stop.latitude,
+                'longitude': stop.longitude,
+                'scheduled_time': time_to_minutes(stop.scheduled_time),
+                'address': stop.name
+            })
+        
+        new_route_df = pd.DataFrame(stops_data)
+        
+        # Добавляем необходимые колонки
+        new_route_df['dwell_time_in_seconds'] = 30
+        
+        # Вычисляем длину сегментов
+        new_route_df['segment_length'] = new_route_df.apply(
+            lambda row: calculate_distance(
+                row['latitude'], 
+                row['longitude'],
+                new_route_df.shift(1)['latitude'].iloc[0] if pd.notna(new_route_df.shift(1)['latitude'].iloc[0]) else row['latitude'],
+                new_route_df.shift(1)['longitude'].iloc[0] if pd.notna(new_route_df.shift(1)['longitude'].iloc[0]) else row['longitude']
+            ),
+            axis=1
+        )
+
+        # Вычисляем scheduled_travel_time как разницу между временем текущей и предыдущей остановки
+        new_route_df['scheduled_travel_time'] = new_route_df['scheduled_time'].diff()
+        # Для первой остановки ставим 0
+        new_route_df.loc[0, 'scheduled_travel_time'] = 0
+        
+        # Заполняем пропущенные значения средним временем
+        mean_travel_time = new_route_df['scheduled_travel_time'].mean()
+        new_route_df['scheduled_travel_time'] = new_route_df['scheduled_travel_time'].fillna(mean_travel_time)
+
+        # Обработаем маршрут и добавим предсказания
+        processed_route = process_data_with_predictions(new_route_df)[0]
+        processed_route['name'] = route.name
+        routes_data.append(processed_route)
+        
+        return {"success": True, "route": processed_route}
+    except Exception as e:
+        print(f"Error creating route: {str(e)}")  # Добавляем детальный вывод ошибки
+        return {"error": f"Failed to create route: {str(e)}"}
+
+def calculate_distance(lat1, lon1, lat2, lon2):
+    # Простой расчет расстояния между координатами (можно улучшить)
+    from math import sqrt
+    return sqrt((lat2 - lat1)**2 + (lon2 - lon1)**2) * 111  # приблизительно в км
+
+@app.delete("/api/routes/{route_id}")
+async def delete_route(route_id: str):
+    try:
+        global routes_data
+        routes_data = [route for route in routes_data if route["id"] != route_id]
+        return {"success": True}
+    except Exception as e:
+        print(f"Error deleting route: {e}")
+        return {"error": f"Failed to delete route: {str(e)}"}
 
 if __name__ == "__main__":
     import uvicorn

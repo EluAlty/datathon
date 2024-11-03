@@ -1,13 +1,14 @@
 'use client'
 
-import React, { useState, useEffect, useRef } from 'react'
-import dynamic from 'next/dynamic'
+import React, { useState, useEffect } from 'react'
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { Icon } from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import { LatLngExpression, Map as LeafletMap, TileLayer as LeafletTileLayer, Polyline as LeafletPolyline, Marker as LeafletMarker, Popup as LeafletPopup, Icon } from 'leaflet'
+import { MapView } from "@/components/MapView"
+import Link from 'next/link'
 
 // Fix for default marker icons
 const defaultIcon = new Icon({
@@ -20,7 +21,8 @@ const defaultIcon = new Icon({
   shadowSize: [41, 41]
 })
 
-LeafletMarker.prototype.options.icon = defaultIcon
+// @ts-expect-error - Leaflet global L is not recognized by TypeScript but is available at runtime
+L.Marker.prototype.options.icon = defaultIcon
 
 type Stop = {
   id: string
@@ -48,56 +50,6 @@ type UploadResponse = {
 }
 
 const API_BASE = 'http://localhost:8000'
-
-const MapView = ({ route }: { route: Route }) => {
-  const mapRef = useRef<HTMLDivElement>(null)
-  const leafletMapRef = useRef<LeafletMap | null>(null)
-
-  useEffect(() => {
-    if (!mapRef.current || !route) return
-
-    const map = new LeafletMap(mapRef.current, {
-      center: route.stops[0].coordinates as LatLngExpression,
-      zoom: 13,
-      scrollWheelZoom: false
-    })
-
-    new LeafletTileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map)
-
-    route.segments.forEach((segment, index) => {
-      const polyline = new LeafletPolyline([segment.from.coordinates, segment.to.coordinates], {
-        color: 'blue',
-        weight: 3
-      }).addTo(map)
-
-      polyline.bindTooltip(`Travel time: ${segment.travelTime} min`, {
-        permanent: false,
-        direction: 'auto'
-      })
-    })
-
-    route.stops.forEach((stop) => {
-      const marker = new LeafletMarker(stop.coordinates).addTo(map)
-      marker.bindPopup(`
-        <div>
-          <h3 style="font-weight: bold;">${stop.name}</h3>
-          <p>Predicted arrival: ${stop.predictedArrivalTime}</p>
-        </div>
-      `)
-    })
-
-    leafletMapRef.current = map
-
-    return () => {
-      if (leafletMapRef.current) {
-        leafletMapRef.current.remove()
-        leafletMapRef.current = null
-      }
-    }
-  }, [route])
-
-  return <div ref={mapRef} style={{ height: '400px', width: '100%' }} />
-}
 
 export default function BusAnalysisInterface() {
   const [routes, setRoutes] = useState<Route[]>([])
@@ -178,36 +130,43 @@ export default function BusAnalysisInterface() {
     <div className="min-h-screen bg-gray-100">
       <header className="bg-blue-600 text-white px-6 py-4">
         <h1 className="text-2xl font-semibold">Astana Bus Analysis System</h1>
+        <nav className="mt-2">
+          <Button variant="ghost" asChild>
+            <Link href="/routes">Manage Routes</Link>
+          </Button>
+        </nav>
       </header>
 
       <main className="container mx-auto px-6 py-8 flex flex-col lg:flex-row gap-8">
-        <Card className="w-full lg:w-1/4">
-          <CardHeader>
-            <CardTitle>Upload Data</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-4">
-              <Input 
-                type="file" 
-                accept=".json,.csv" 
-                onChange={handleFileChange}
-                className="cursor-pointer"
-              />
-              <Button 
-                onClick={handleFileUpload} 
-                disabled={!file || isLoading}
-                className="w-full"
-              >
-                {isLoading ? 'Uploading...' : 'Upload and Process'}
-              </Button>
-              {error && (
-                <p className="text-sm text-red-500 bg-red-50 p-2 rounded">
-                  {error}
-                </p>
-              )}
-            </div>
-          </CardContent>
-        </Card>
+        <div className="w-full lg:w-1/4 space-y-8">
+          <Card>
+            <CardHeader>
+              <CardTitle>Upload Data</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-4">
+                <Input 
+                  type="file" 
+                  accept=".json,.csv" 
+                  onChange={handleFileChange}
+                  className="cursor-pointer"
+                />
+                <Button 
+                  onClick={handleFileUpload} 
+                  disabled={!file || isLoading}
+                  className="w-full"
+                >
+                  {isLoading ? 'Uploading...' : 'Upload and Process'}
+                </Button>
+                {error && (
+                  <p className="text-sm text-red-500 bg-red-50 p-2 rounded">
+                    {error}
+                  </p>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
 
         <div className="flex-1 space-y-8">
           <Card>
